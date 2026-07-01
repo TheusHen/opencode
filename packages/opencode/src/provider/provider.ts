@@ -33,6 +33,50 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+const HACKCLUB_PROVIDER_ID = ProviderV2.ID.make("hackclub")
+const HACKCLUB_BASE_URL = "https://ai.hackclub.com/proxy/v1"
+const HACKCLUB_FALLBACK_MODEL_ID = "qwen/qwen3-32b"
+
+const HACKCLUB_PROVIDER = {
+  api: HACKCLUB_BASE_URL,
+  name: "Hack Club AI",
+  env: ["HACK_CLUB_AI_API_KEY"],
+  id: HACKCLUB_PROVIDER_ID,
+  npm: "@openrouter/ai-sdk-provider",
+  models: {
+    [HACKCLUB_FALLBACK_MODEL_ID]: hackClubModel(HACKCLUB_FALLBACK_MODEL_ID),
+  },
+} satisfies ModelsDev.Provider
+
+function hackClubModel(id: string): ModelsDev.Model {
+  return {
+    id,
+    name: id,
+    release_date: "",
+    attachment: false,
+    reasoning: false,
+    temperature: true,
+    tool_call: true,
+    cost: { input: 0, output: 0 },
+    limit: { context: 0, output: 0 },
+    modalities: { input: ["text"], output: ["text"] },
+    provider: { npm: "@openrouter/ai-sdk-provider", api: HACKCLUB_BASE_URL },
+  }
+}
+
+async function discoverHackClubModels(): Promise<Record<string, Model>> {
+  const response = await fetch(`${HACKCLUB_BASE_URL}/models`, { signal: AbortSignal.timeout(5000) })
+  if (!response.ok) return {}
+  const payload = await response.json()
+  if (!isRecord(payload) || !Array.isArray(payload.data)) return {}
+  return Object.fromEntries(
+    payload.data.flatMap((model): [string, Model][] =>
+      isRecord(model) && typeof model.id === "string"
+        ? [[model.id, fromModelsDevModel(HACKCLUB_PROVIDER, hackClubModel(model.id))]]
+        : [],
+    ),
+  )
+}
 
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
@@ -460,6 +504,12 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
             "X-Title": "opencode",
           },
         },
+      }),
+    hackclub: () =>
+      Effect.succeed({
+        autoload: false,
+        options: { baseURL: HACKCLUB_BASE_URL, baseUrl: HACKCLUB_BASE_URL },
+        discoverModels: discoverHackClubModels,
       }),
     nvidia: (provider) =>
       Effect.succeed({
@@ -1316,6 +1366,7 @@ const layer = Layer.effect(
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
         const catalog = mapValues(modelsDev, fromModelsDevProvider)
+        if (!catalog[HACKCLUB_PROVIDER_ID]) catalog[HACKCLUB_PROVIDER_ID] = fromModelsDevProvider(HACKCLUB_PROVIDER)
         const database = mapValues(catalog, toPublicInfo)
 
         const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
@@ -1560,18 +1611,17 @@ const layer = Layer.effect(
           mergeProvider(providerID, partial)
         }
 
-        const gitlab = ProviderV2.ID.make("gitlab")
-        if (discoveryLoaders[gitlab] && providers[gitlab] && isProviderAllowed(gitlab)) {
-          yield* Effect.promise(async () => {
-            try {
-              const discovered = await discoveryLoaders[gitlab]()
-              for (const [modelID, model] of Object.entries(discovered)) {
-                if (!providers[gitlab].models[modelID]) {
-                  providers[gitlab].models[modelID] = model
-                }
-              }
-            } catch (e) {}
-          })
+        for (const [id, discover] of Object.entries(discoveryLoaders)) {
+          const providerID = ProviderV2.ID.make(id)
+          if (!providers[providerID] || !isProviderAllowed(providerID)) continue
+          const discovered = yield* Effect.promise(() => discover()).pipe(
+            Effect.catch(() => Effect.succeed({} as Record<string, Model>)),
+          )
+          for (const [modelID, model] of Object.entries(discovered)) {
+            if (!providers[providerID].models[modelID]) {
+              providers[providerID].models[modelID] = model
+            }
+          }
         }
 
         for (const [id, provider] of Object.entries(providers)) {

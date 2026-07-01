@@ -89,9 +89,9 @@ const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
 
 const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
   const body = model.request.body
-  const httpBody = Object.hasOwn(body, "apiKey")
-    ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey"))
-    : body
+  const httpBody = Object.fromEntries(
+    Object.entries(body).filter(([key]) => !["apiKey", "baseURL", "baseUrl"].includes(key)),
+  )
   return route.with({
     provider: model.providerID,
     endpoint: model.api.url === undefined ? undefined : { baseURL: model.api.url },
@@ -160,6 +160,13 @@ export const fromCatalogModel = (
         .model({ id: resolved.api.id }),
     )
   }
+  if (resolved.api.type === "aisdk" && resolved.api.package === "@openrouter/ai-sdk-provider" && resolved.api.url) {
+    return Effect.succeed(
+      withDefaults(resolved, OpenAICompatibleChat.route)
+        .with({ auth: key === undefined ? Auth.none : Auth.bearer(key) })
+        .model({ id: resolved.api.id }),
+    )
+  }
   return Effect.fail(
     new UnsupportedApiError({
       providerID: resolved.providerID,
@@ -176,6 +183,7 @@ export const supported = (model: ModelV2.Info) =>
   model.api.type === "aisdk" &&
   (model.api.package === "@ai-sdk/openai" ||
     model.api.package === "@ai-sdk/anthropic" ||
+    (model.api.package === "@openrouter/ai-sdk-provider" && model.api.url !== undefined) ||
     (model.api.package === "@ai-sdk/openai-compatible" && model.api.url !== undefined))
 
 /** Resolves models from the catalog belonging to the current Location runtime. */
